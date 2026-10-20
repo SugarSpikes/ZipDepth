@@ -1,0 +1,101 @@
+name: Clone and Export ZipDepth ONNX
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Clone official ZipDepth repository
+        uses: actions/checkout@v4
+        with:
+          repository: fabiotosi92/ZipDepth
+          ref: main
+          path: ZipDepth
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision \
+            --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install onnx onnxscript onnxsim onnxruntime
+
+      - name: Check checkpoint
+        working-directory: ZipDepth
+        run: |
+          set -euxo pipefail
+          test -f checkpoints/zipdepth_base_npu.pth
+
+      - name: Export ONNX
+        working-directory: ZipDepth
+        run: |
+          set -euxo pipefail
+          python scripts/export.py \
+            --ckpt checkpoints/zipdepth_base_npu.pth \
+            --format onnx \
+            --height 384 \
+            --width 384 \
+            --npu \
+            --output "$GITHUB_WORKSPACE/zipdepth_base_npu_384x384.onnx"
+
+      - name: Validate ONNX graph and run inference smoke test
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          import numpy as np
+          import onnx
+          import onnxruntime as ort
+
+          path = "zipdepth_base_npu_384x384.onnx"
+          model = onnx.load(path)
+          onnx.checker.check_model(model)
+
+          session = ort.InferenceSession(
+              path,
+              providers=["CPUExecutionProvider"],
+          )
+
+          inputs = session.get_inputs()
+          if len(inputs) != 1:
+              raise RuntimeError(
+                  f"Expected one model input, got {len(inputs)}"
+              )
+
+          shape = inputs[0].shape
+          if len(shape) != 4 or any(
+              not isinstance(v, int) for v in shape
+          ):
+              raise RuntimeError(
+                  f"Cannot infer static input shape: {shape}"
+              )
+
+          dummy = np.zeros(shape, dtype=np.float32)
+          outputs = session.run(None, {inputs[0].name: dummy})
+
+          if not outputs or not np.isfinite(outputs[0]).all():
+              raise RuntimeError("Invalid ONNX inference output")
+
+          print("ONNX validation and CPU inference passed.")
+          print("Input shape:", shape)
+          print("Output shapes:", [x.shape for x in outputs])
+          PY
+
+      - name: Upload ONNX model
+        uses: actions/upload-artifact@v4
+        with:
+          name: zipdepth-base-npu-onnx-384x384
+          path: zipdepth_base_npu_384x384.onnx
+          if-no-files-found: error
+          retention-days: 14
