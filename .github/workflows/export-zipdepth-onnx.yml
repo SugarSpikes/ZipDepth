@@ -50,6 +50,39 @@ jobs:
             --npu \
             --output "$GITHUB_WORKSPACE/zipdepth_base_npu_384x384.onnx"
 
+      - name: Print ONNX input and output metadata
+        run: |
+          python -m pip install onnx
+          python - <<'PYONNX'
+          import os
+          import onnx
+          from onnx import TensorProto
+
+          path = os.path.join(
+              os.environ["GITHUB_WORKSPACE"],
+              "zipdepth_base_npu_384x384.onnx",
+          )
+          model = onnx.load(path)
+
+          for label, tensors in (
+              ("INPUTS", model.graph.input),
+              ("OUTPUTS", model.graph.output),
+          ):
+              print("\\n" + label)
+              for t in tensors:
+                  tensor = t.type.tensor_type
+                  shape = [
+                      d.dim_value if d.HasField("dim_value")
+                      else d.dim_param or "?"
+                      for d in tensor.shape.dim
+                  ]
+                  print(
+                      f"name={t.name}, "
+                      f"type={TensorProto.DataType.Name(tensor.elem_type)}, "
+                      f"shape={shape}"
+                  )
+          PYONNX
+
       - name: Validate ONNX graph and run inference smoke test
         run: |
           set -euxo pipefail
